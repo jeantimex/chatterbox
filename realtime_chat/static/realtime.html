@@ -47,9 +47,9 @@
 
         .visualizer-bar {
             width: 6px;
-            background: linear-gradient(to top, #3b82f6, #8b5cf6);
+            min-height: 4px;
+            background: linear-gradient(to top, #22c55e, #16a34a);
             border-radius: 3px;
-            transition: height 0.05s ease;
         }
 
         .listening .visualizer-bar { background: linear-gradient(to top, #22c55e, #16a34a); }
@@ -195,11 +195,17 @@
 
         function updateVisualizer(data) {
             const bars = visualizer.querySelectorAll('.visualizer-bar');
-            const step = Math.floor(data.length / bars.length);
-            bars.forEach((bar, i) => {
-                const val = data[i * step] || 0;
-                bar.style.height = Math.max(4, (val / 255) * 60) + 'px';
-            });
+            if (!bars.length || !data.length) return;
+
+            const noiseFloor = 20; // Ignore values below this threshold
+            const step = Math.max(1, Math.floor(data.length / bars.length));
+            for (let i = 0; i < bars.length; i++) {
+                let val = data[Math.min(i * step, data.length - 1)] || 0;
+                // Apply noise floor
+                val = val > noiseFloor ? val - noiseFloor : 0;
+                const height = Math.max(4, (val / (255 - noiseFloor)) * 60);
+                bars[i].style.height = height + 'px';
+            }
         }
 
         function connect() {
@@ -320,6 +326,7 @@
 
                 analyser = audioContext.createAnalyser();
                 analyser.fftSize = 256;
+                analyser.smoothingTimeConstant = 0.5;
                 source.connect(analyser);
 
                 processor = audioContext.createScriptProcessor(4096, 1, 1);
@@ -333,15 +340,21 @@
                         int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
                     }
                     ws.send(int16.buffer);
-
-                    // Update visualizer
-                    const freqData = new Uint8Array(analyser.frequencyBinCount);
-                    analyser.getByteFrequencyData(freqData);
-                    updateVisualizer(freqData);
                 };
 
                 source.connect(processor);
                 processor.connect(audioContext.destination);
+
+                // Continuous visualizer update loop using setInterval for reliability
+                const visualizerInterval = setInterval(() => {
+                    if (!isRunning || !analyser) {
+                        clearInterval(visualizerInterval);
+                        return;
+                    }
+                    const freqData = new Uint8Array(analyser.frequencyBinCount);
+                    analyser.getByteFrequencyData(freqData);
+                    updateVisualizer(freqData);
+                }, 30); // ~33fps
 
                 isRunning = true;
                 connect();
