@@ -137,7 +137,7 @@ Download a reference voice clip from YouTube:
 
 ```bash
 # Install dependencies (if needed)
-brew install yt-dlp ffmpeg
+brew install yt-dlp ffmpeg pipx
 
 # Download 10 seconds of audio (adjust start/end times)
 python download_reference.py "https://youtube.com/watch?v=VIDEO_ID" --start 0:30 --end 0:40 --output speaker.wav
@@ -167,6 +167,11 @@ Note: Voice isolation takes ~30-60 seconds depending on clip length. Uses a two-
 1. **UVR-MDX-NET-Voc_FT** — separates vocals from instrumental
 2. **Reverb_HQ_By_FoxJoy** — removes reverb for cleaner vocals
 
+Requires `audio-separator` installed via pipx (to avoid dependency conflicts):
+```bash
+pipx install "audio-separator[cpu]"
+```
+
 Models are auto-downloaded on first use (~100MB).
 
 ### Test Voice Cloning
@@ -180,6 +185,15 @@ python test_voice_cloning.py speaker.wav --lang en
 
 # Multiple languages
 python test_voice_cloning.py speaker.wav --lang en,zh,ja,ko
+
+# Custom text (inline or from file)
+python test_voice_cloning.py speaker.wav --lang en --text "Hello, this is my custom message!"
+python test_voice_cloning.py speaker.wav --lang zh --text "你好，这是我的自定义消息！"
+python test_voice_cloning.py speaker.wav --lang en --text script.txt
+
+# Turbo model with paralinguistic tags (English only)
+python test_voice_cloning.py speaker.wav --turbo
+python test_voice_cloning.py speaker.wav --turbo --text "Oh wow! [laugh] That's amazing! [chuckle] Tell me more."
 ```
 
 ### Voice Cloning Parameters
@@ -205,6 +219,22 @@ python test_voice_cloning.py speaker.wav --lang en -e 0.7 -c 0.5
 - If reference speaker talks fast, lower `cfg_weight` (~0.3) helps with pacing
 - For dramatic speech, use lower `cfg_weight` (~0.3) + higher `exaggeration` (~0.7)
 - Cross-language cloning may inherit reference accent — set `cfg_weight=0` to mitigate
+
+### Paralinguistic Tags (Turbo Model Only)
+
+The Turbo model supports embedded emotion/sound tags for more expressive speech:
+
+```
+[clear throat]  [sigh]  [shush]  [cough]  [groan]
+[sniff]  [gasp]  [chuckle]  [laugh]
+```
+
+Example:
+```bash
+python test_voice_cloning.py speaker.wav --turbo --text "Oh, that's hilarious! [laugh] I can't believe it. [sigh] Anyway, let's continue."
+```
+
+The model produces natural-sounding expressions at the tag locations.
 
 ## Supported Languages
 The general-purpose Chatterbox Multilingual model supports the following languages:
