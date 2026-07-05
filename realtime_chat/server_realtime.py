@@ -346,7 +346,7 @@ class ConversationSession:
             self.processing_speech = False
 
     async def speak_streaming(self, user_text: str):
-        """Stream LLM response and synthesize sentence by sentence."""
+        """Stream LLM response and synthesize sentences in parallel."""
         if not llm or not tts:
             await self.ws.send_json({"type": "status", "text": "Listening..."})
             return
@@ -356,10 +356,6 @@ class ConversationSession:
         self._tts_started = False
         self._text_shown = False
 
-        sentence_buffer = ""
-        full_response = ""
-        sentences_to_speak = []
-
         loop = asyncio.get_event_loop()
 
         # First, collect full LLM response
@@ -367,9 +363,7 @@ class ConversationSession:
             return list(llm.chat_stream(user_text))
 
         chunks = await loop.run_in_executor(None, get_llm_chunks)
-
-        for chunk in chunks:
-            full_response += chunk
+        full_response = "".join(chunks)
 
         logger.info(f"AI: {full_response}")
 
@@ -385,29 +379,97 @@ class ConversationSession:
         # Show typing indicator while preparing first audio
         await self.ws.send_json({"type": "typing", "show": True})
 
-        # Synthesize first sentence, then show full text when audio starts
-        for i, sentence in enumerate(sentences_to_speak):
-            if self.should_stop_tts:
-                break
-
-            logger.info(f"Synthesizing sentence {i+1}/{len(sentences_to_speak)}: {sentence[:50]}...")
-
-            # Show full response when first audio chunk is ready
-            show_text = not self._text_shown
-            await self.speak_sentence(sentence, full_response if show_text else None)
+        # Parallel synthesis: synthesize next sentence while current plays
+        await self.speak_parallel(sentences_to_speak, full_response)
 
         # Send tts_end if we started
         if self._tts_started:
             await self.ws.send_json({"type": "tts_end"})
 
-        # If text wasn't shown yet (no audio generated), show it now
+        # If text wasn't shown yet, show it now
         if not self._text_shown:
+            await self.ws.send_json({"type": "typing", "show": False})
             await self.ws.send_json({"type": "ai_text", "text": full_response})
 
         self.is_ai_speaking = False
         self._tts_started = False
         self._text_shown = False
         await self.ws.send_json({"type": "status", "text": "Listening..."})
+
+    async def speak_parallel(self, sentences: list, full_response: str):
+        """Synthesize sentences in parallel - next sentence while current plays."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        # Pre-synthesized audio storage: {index: [chunks]}
+        synthesized = {}
+
+        def synthesize_sentence(idx, sentence):
+            """Synthesize a sentence in background thread."""
+            if self.should_stop_tts:
+                return []
+
+            logger.info(f"[Parallel] Starting synthesis {idx+1}: {sentence[:40]}...")
+            chunks = []
+            q = Queue()
+            tts.synthesize(sentence, q)
+            while True:
+                try:
+                    chunk = q.get_nowait()
+                    if chunk is None:
+                        break
+                    chunks.append(chunk)
+                except Empty:
+                    break
+            logger.info(f"[Parallel] Finished synthesis {idx+1}: {len(chunks)} chunks")
+            return chunks
+
+        executor = ThreadPoolExecutor(max_workers=2)
+        futures = {}
+
+        # Submit first sentence immediately
+        if len(sentences) > 0:
+            futures[0] = executor.submit(synthesize_sentence, 0, sentences[0])
+
+        # Submit second sentence in parallel with first
+        if len(sentences) > 1:
+            futures[1] = executor.submit(synthesize_sentence, 1, sentences[1])
+
+        # Process sentences in order
+        for i in range(len(sentences)):
+            if self.should_stop_tts:
+                break
+
+            # Wait for this sentence's synthesis to complete
+            if i in futures:
+                synthesized[i] = futures[i].result()
+
+            # Start synthesizing sentence i+2 while we stream sentence i
+            next_idx = i + 2
+            if next_idx < len(sentences) and next_idx not in futures:
+                futures[next_idx] = executor.submit(synthesize_sentence, next_idx, sentences[next_idx])
+
+            # Stream current sentence's audio
+            if i in synthesized and synthesized[i]:
+                chunks = synthesized[i]
+
+                if not self._tts_started:
+                    await self.ws.send_json({"type": "tts_start"})
+                    self._tts_started = True
+
+                    # Show full response when first audio starts
+                    if not self._text_shown:
+                        await self.ws.send_json({"type": "typing", "show": False})
+                        await self.ws.send_json({"type": "ai_text", "text": full_response})
+                        self._text_shown = True
+
+                for chunk in chunks:
+                    if self.should_stop_tts:
+                        break
+                    chunk_b64 = base64.b64encode(chunk).decode('utf-8')
+                    await self.ws.send_json({"type": "tts_chunk", "audio": chunk_b64})
+                    await asyncio.sleep(0.005)
+
+        executor.shutdown(wait=False)
 
     def _extract_sentences(self, text: str) -> list:
         """Split text into sentences."""
