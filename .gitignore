@@ -46,3 +46,9 @@ checkpoints/
 
 # Ignore generated sample .wav files
 **/*.wav
+
+# Virtual environment
+venv/
+
+# Test output directory
+samples/
