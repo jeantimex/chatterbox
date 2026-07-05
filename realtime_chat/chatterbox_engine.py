@@ -100,9 +100,9 @@ class ChatterboxEngine:
             logger.info("Loading Chatterbox Turbo model...")
             self.model = ChatterboxTurboTTS.from_pretrained(device=self.device)
         else:
-            from chatterbox.tts import ChatterboxTTS
-            logger.info("Loading Chatterbox TTS model...")
-            self.model = ChatterboxTTS.from_pretrained(device=self.device)
+            from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+            logger.info("Loading Chatterbox Multilingual model...")
+            self.model = ChatterboxMultilingualTTS.from_pretrained(device=self.device)
         logger.info("Chatterbox model loaded!")
 
         # Prewarm with a short synthesis
@@ -121,11 +121,18 @@ class ChatterboxEngine:
             else:
                 self._conditionals_cached = False
 
-            # Prewarm with a short synthesis (no audio_prompt_path since we cached it)
-            if self._conditionals_cached:
-                _ = self.model.generate("Hello.")
+            # Prewarm with a short synthesis
+            if self.use_turbo:
+                if self._conditionals_cached:
+                    _ = self.model.generate("Hello.")
+                else:
+                    _ = self.model.generate("Hello.", audio_prompt_path=self.reference_audio)
             else:
-                _ = self.model.generate("Hello.", audio_prompt_path=self.reference_audio)
+                # Multilingual model needs language_id
+                if self._conditionals_cached:
+                    _ = self.model.generate("Hello.", language_id="en")
+                else:
+                    _ = self.model.generate("Hello.", language_id="en", audio_prompt_path=self.reference_audio)
 
             elapsed = time.time() - start
             logger.info(f"Prewarm complete in {elapsed:.2f}s")
@@ -154,6 +161,36 @@ class ChatterboxEngine:
             except Exception as e:
                 logger.warning(f"Failed to cache reference audio: {e}")
                 self._conditionals_cached = False
+
+    def _detect_language(self, text: str) -> str:
+        """Detect language from text for multilingual TTS."""
+        for char in text:
+            code = ord(char)
+            # Chinese
+            if 0x4E00 <= code <= 0x9FFF or 0x3400 <= code <= 0x4DBF:
+                return "zh"
+            # Japanese (Hiragana, Katakana)
+            if 0x3040 <= code <= 0x309F or 0x30A0 <= code <= 0x30FF:
+                return "ja"
+            # Korean (Hangul)
+            if 0xAC00 <= code <= 0xD7AF or 0x1100 <= code <= 0x11FF:
+                return "ko"
+            # Arabic
+            if 0x0600 <= code <= 0x06FF:
+                return "ar"
+            # Hebrew
+            if 0x0590 <= code <= 0x05FF:
+                return "he"
+            # Russian/Cyrillic
+            if 0x0400 <= code <= 0x04FF:
+                return "ru"
+            # Greek
+            if 0x0370 <= code <= 0x03FF:
+                return "el"
+            # Hindi/Devanagari
+            if 0x0900 <= code <= 0x097F:
+                return "hi"
+        return "en"
 
     def _split_sentences(self, text: str) -> list[tuple[str, str]]:
         """
@@ -232,8 +269,12 @@ class ChatterboxEngine:
                             temperature=0.8,
                         )
                     else:
+                        # Multilingual model needs language_id
+                        lang = self._detect_language(text)
+                        logger.info(f"Detected language: {lang}")
                         audio = self.model.generate(
                             text,
+                            language_id=lang,
                             exaggeration=0.5,
                             cfg_weight=0.5,
                         )
@@ -246,8 +287,12 @@ class ChatterboxEngine:
                             temperature=0.8,
                         )
                     else:
+                        # Multilingual model needs language_id
+                        lang = self._detect_language(text)
+                        logger.info(f"Detected language: {lang}")
                         audio = self.model.generate(
                             text,
+                            language_id=lang,
                             audio_prompt_path=self.reference_audio,
                             exaggeration=0.5,
                             cfg_weight=0.5,

@@ -106,10 +106,11 @@ class SimpleVAD:
 class SpeechToText:
     """Speech-to-text using faster-whisper."""
 
-    def __init__(self, model_size: str = "base"):
+    def __init__(self, model_size: str = "base", language: str = "en"):
+        self.language = language if language != "auto" else None
         try:
             from faster_whisper import WhisperModel
-            logger.info(f"Loading Whisper model: {model_size}")
+            logger.info(f"Loading Whisper model: {model_size}, language: {language}")
             self.model = WhisperModel(model_size, device="auto", compute_type="auto")
             logger.info("Whisper model loaded")
         except ImportError:
@@ -121,7 +122,7 @@ class SpeechToText:
             return ""
 
         audio_float = audio.astype(np.float32) / 32768.0
-        segments, _ = self.model.transcribe(audio_float, language="en", beam_size=5)
+        segments, _ = self.model.transcribe(audio_float, language=self.language, beam_size=5)
         return " ".join([seg.text for seg in segments]).strip()
 
 
@@ -195,13 +196,17 @@ def init_components():
     llm_provider = os.getenv("LLM_PROVIDER", "ollama")
     llm_model = os.getenv("LLM_MODEL", "llama3.2")
 
+    # Turbo = English only, Multilingual = auto-detect language
+    stt_language = "en" if use_turbo else "auto"
+
     logger.info("=" * 50)
     logger.info("Initializing Realtime Voice Chat...")
     logger.info(f"Reference audio: {reference_audio}")
     logger.info(f"Use Turbo: {use_turbo}")
+    logger.info(f"STT Language: {stt_language}")
     logger.info("=" * 50)
 
-    stt = SpeechToText("base")
+    stt = SpeechToText("base", language=stt_language)
     llm = LLMClient(llm_provider, llm_model)
     tts = ChatterboxEngine(reference_audio=reference_audio, use_turbo=use_turbo)
 
@@ -337,6 +342,8 @@ class ConversationSession:
             logger.info(f"User: {text}")
             await self.ws.send_json({"type": "user_text", "text": text})
 
+            # Show typing indicator while thinking + preparing TTS
+            await self.ws.send_json({"type": "typing", "show": True})
             await self.ws.send_json({"type": "status", "text": "Thinking..."})
 
             # Use streaming LLM with sentence-level TTS
@@ -371,13 +378,11 @@ class ConversationSession:
         sentences_to_speak = [s.strip() for s in self._extract_sentences(full_response) if s.strip()]
 
         if not sentences_to_speak:
+            await self.ws.send_json({"type": "typing", "show": False})
             await self.ws.send_json({"type": "ai_text", "text": full_response})
             self.is_ai_speaking = False
             await self.ws.send_json({"type": "status", "text": "Listening..."})
             return
-
-        # Show typing indicator while preparing first audio
-        await self.ws.send_json({"type": "typing", "show": True})
 
         # Parallel synthesis: synthesize next sentence while current plays
         await self.speak_parallel(sentences_to_speak, full_response)
@@ -675,15 +680,21 @@ async def websocket_endpoint(ws: WebSocket):
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Chatterbox Realtime Voice Chat")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--reference", "-r")
+    parser.add_argument("--reference", "-r", help="Reference audio for voice cloning")
+    parser.add_argument("--no-turbo", action="store_true",
+                        help="Use Multilingual model (slower but supports all languages)")
 
     args = parser.parse_args()
 
     if args.reference:
         os.environ["REFERENCE_AUDIO"] = args.reference
+    if args.no_turbo:
+        os.environ["USE_TURBO"] = "false"
 
+    mode = "Multilingual (all languages)" if args.no_turbo else "Turbo (English only)"
     logger.info(f"Starting realtime server on {args.host}:{args.port}")
+    logger.info(f"Mode: {mode}")
     uvicorn.run(app, host=args.host, port=args.port)
