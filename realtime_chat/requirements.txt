@@ -1,0 +1,15 @@
+# Realtime Voice Chat dependencies
+fastapi>=0.100.0
+uvicorn>=0.23.0
+websockets>=11.0
+
+# Speech-to-Text
+faster-whisper>=0.10.0
+
+# LLM clients (install one or both)
+ollama>=0.1.0
+openai>=1.0.0
+
+# Audio processing
+numpy>=1.24.0
+scipy>=1.10.0

@@ -236,6 +236,24 @@ python test_voice_cloning.py speaker.wav --turbo --text "Oh, that's hilarious! [
 
 The model produces natural-sounding expressions at the tag locations.
 
+### Realtime Voice Chat
+
+A web-based voice chat interface using Chatterbox for voice cloning:
+
+```bash
+# Prerequisites: Ollama running with a model
+ollama pull llama3.2
+ollama serve
+
+# Start the realtime chat server
+cd realtime_chat
+./run.sh ../speaker.wav
+```
+
+Then open http://localhost:8000 in your browser. Hold the microphone button to speak, and the AI responds in your cloned voice.
+
+See [realtime_chat/README.md](realtime_chat/README.md) for full documentation.
+
 ## Supported Languages
 The general-purpose Chatterbox Multilingual model supports the following languages:
 
