@@ -354,55 +354,59 @@ class ConversationSession:
         self.is_ai_speaking = True
         self.should_stop_tts = False
         self._tts_started = False
+        self._text_shown = False
 
         sentence_buffer = ""
         full_response = ""
+        sentences_to_speak = []
 
         loop = asyncio.get_event_loop()
 
-        # Stream from LLM
+        # First, collect full LLM response
         def get_llm_chunks():
             return list(llm.chat_stream(user_text))
 
         chunks = await loop.run_in_executor(None, get_llm_chunks)
 
         for chunk in chunks:
+            full_response += chunk
+
+        logger.info(f"AI: {full_response}")
+
+        # Extract all sentences
+        sentences_to_speak = [s.strip() for s in self._extract_sentences(full_response) if s.strip()]
+
+        if not sentences_to_speak:
+            await self.ws.send_json({"type": "ai_text", "text": full_response})
+            self.is_ai_speaking = False
+            await self.ws.send_json({"type": "status", "text": "Listening..."})
+            return
+
+        # Show typing indicator while preparing first audio
+        await self.ws.send_json({"type": "typing", "show": True})
+
+        # Synthesize first sentence, then show full text when audio starts
+        for i, sentence in enumerate(sentences_to_speak):
             if self.should_stop_tts:
                 break
 
-            full_response += chunk
-            sentence_buffer += chunk
+            logger.info(f"Synthesizing sentence {i+1}/{len(sentences_to_speak)}: {sentence[:50]}...")
 
-            # Check for sentence boundaries
-            sentences = self._extract_sentences(sentence_buffer)
-
-            for sentence in sentences[:-1]:  # All complete sentences
-                if self.should_stop_tts:
-                    break
-
-                if sentence.strip():
-                    logger.info(f"Synthesizing sentence: {sentence[:50]}...")
-                    await self.speak_sentence(sentence)
-
-            # Keep the incomplete part
-            sentence_buffer = sentences[-1] if sentences else ""
-
-        # Synthesize remaining text
-        if sentence_buffer.strip() and not self.should_stop_tts:
-            logger.info(f"Synthesizing final: {sentence_buffer[:50]}...")
-            await self.speak_sentence(sentence_buffer)
-
-        # Send final AI text only once at the end
-        if full_response.strip():
-            logger.info(f"AI: {full_response}")
-            await self.ws.send_json({"type": "ai_text", "text": full_response})
+            # Show full response when first audio chunk is ready
+            show_text = not self._text_shown
+            await self.speak_sentence(sentence, full_response if show_text else None)
 
         # Send tts_end if we started
         if self._tts_started:
             await self.ws.send_json({"type": "tts_end"})
 
+        # If text wasn't shown yet (no audio generated), show it now
+        if not self._text_shown:
+            await self.ws.send_json({"type": "ai_text", "text": full_response})
+
         self.is_ai_speaking = False
         self._tts_started = False
+        self._text_shown = False
         await self.ws.send_json({"type": "status", "text": "Listening..."})
 
     def _extract_sentences(self, text: str) -> list:
@@ -421,7 +425,7 @@ class ConversationSession:
             sentences.append(current)
         return sentences
 
-    async def speak_sentence(self, sentence: str):
+    async def speak_sentence(self, sentence: str, show_text: str = None):
         """Synthesize and stream a single sentence."""
         if not sentence.strip():
             return
@@ -457,9 +461,15 @@ class ConversationSession:
 
         # Stream chunks
         if audio_chunks:
-            if not hasattr(self, '_tts_started') or not self._tts_started:
+            if not self._tts_started:
                 await self.ws.send_json({"type": "tts_start"})
                 self._tts_started = True
+
+                # Show full AI response when first audio starts
+                if show_text and not self._text_shown:
+                    await self.ws.send_json({"type": "typing", "show": False})
+                    await self.ws.send_json({"type": "ai_text", "text": show_text})
+                    self._text_shown = True
 
             for chunk in audio_chunks:
                 if self.should_stop_tts:
