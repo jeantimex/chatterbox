@@ -126,7 +126,7 @@ class SpeechToText:
 
 
 class LLMClient:
-    """LLM client for Ollama."""
+    """LLM client for Ollama with streaming support."""
 
     def __init__(self, provider: str = "ollama", model: str = "llama3.2"):
         self.provider = provider
@@ -155,6 +155,26 @@ class LLMClient:
         except Exception as e:
             logger.error(f"LLM error: {e}")
             return "Sorry, I had trouble understanding."
+
+    def chat_stream(self, user_message: str):
+        """Stream LLM response, yielding chunks."""
+        if not user_message.strip():
+            return
+
+        self.history.append({"role": "user", "content": user_message})
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + self.history[-10:]
+
+        full_response = ""
+        try:
+            for chunk in self.client.chat(model=self.model, messages=messages, stream=True):
+                content = chunk['message']['content']
+                full_response += content
+                yield content
+
+            self.history.append({"role": "assistant", "content": full_response})
+        except Exception as e:
+            logger.error(f"LLM stream error: {e}")
+            yield "Sorry, I had trouble understanding."
 
     def clear(self):
         self.history = []
@@ -319,18 +339,134 @@ class ConversationSession:
 
             await self.ws.send_json({"type": "status", "text": "Thinking..."})
 
-            # Run LLM in executor
-            response = await loop.run_in_executor(
-                None, lambda: llm.chat(text) if llm else "I can't respond right now."
-            )
+            # Use streaming LLM with sentence-level TTS
+            await self.speak_streaming(text)
 
-            logger.info(f"AI: {response}")
-            await self.ws.send_json({"type": "ai_text", "text": response})
-
-            # Speak response (non-blocking)
-            await self.speak(response)
         finally:
             self.processing_speech = False
+
+    async def speak_streaming(self, user_text: str):
+        """Stream LLM response and synthesize sentence by sentence."""
+        if not llm or not tts:
+            await self.ws.send_json({"type": "status", "text": "Listening..."})
+            return
+
+        self.is_ai_speaking = True
+        self.should_stop_tts = False
+        self._tts_started = False
+
+        sentence_buffer = ""
+        full_response = ""
+
+        loop = asyncio.get_event_loop()
+
+        # Stream from LLM
+        def get_llm_chunks():
+            return list(llm.chat_stream(user_text))
+
+        chunks = await loop.run_in_executor(None, get_llm_chunks)
+
+        for chunk in chunks:
+            if self.should_stop_tts:
+                break
+
+            full_response += chunk
+            sentence_buffer += chunk
+
+            # Check for sentence boundaries
+            sentences = self._extract_sentences(sentence_buffer)
+
+            for sentence in sentences[:-1]:  # All complete sentences
+                if self.should_stop_tts:
+                    break
+
+                if sentence.strip():
+                    logger.info(f"Synthesizing sentence: {sentence[:50]}...")
+                    await self.speak_sentence(sentence)
+
+            # Keep the incomplete part
+            sentence_buffer = sentences[-1] if sentences else ""
+
+        # Synthesize remaining text
+        if sentence_buffer.strip() and not self.should_stop_tts:
+            logger.info(f"Synthesizing final: {sentence_buffer[:50]}...")
+            await self.speak_sentence(sentence_buffer)
+
+        # Send final AI text only once at the end
+        if full_response.strip():
+            logger.info(f"AI: {full_response}")
+            await self.ws.send_json({"type": "ai_text", "text": full_response})
+
+        # Send tts_end if we started
+        if self._tts_started:
+            await self.ws.send_json({"type": "tts_end"})
+
+        self.is_ai_speaking = False
+        self._tts_started = False
+        await self.ws.send_json({"type": "status", "text": "Listening..."})
+
+    def _extract_sentences(self, text: str) -> list:
+        """Split text into sentences."""
+        import re
+        # Split on sentence endings but keep the delimiter
+        parts = re.split(r'([.!?]+\s*)', text)
+        sentences = []
+        current = ""
+        for part in parts:
+            current += part
+            if re.match(r'[.!?]+\s*$', part):
+                sentences.append(current)
+                current = ""
+        if current:
+            sentences.append(current)
+        return sentences
+
+    async def speak_sentence(self, sentence: str):
+        """Synthesize and stream a single sentence."""
+        if not sentence.strip():
+            return
+
+        audio_chunks = []
+        self.tts_done.clear()
+
+        def run_synthesis():
+            q = Queue()
+            tts.synthesize(sentence, q)
+            while True:
+                try:
+                    chunk = q.get_nowait()
+                    if chunk is None:
+                        break
+                    audio_chunks.append(chunk)
+                except Empty:
+                    break
+            self.tts_done.set()
+
+        # Run TTS
+        thread = threading.Thread(target=run_synthesis, daemon=True)
+        thread.start()
+
+        # Wait with interrupt checks
+        while not self.tts_done.is_set():
+            if self.should_stop_tts:
+                return
+            await asyncio.sleep(0.05)
+
+        if self.should_stop_tts:
+            return
+
+        # Stream chunks
+        if audio_chunks:
+            if not hasattr(self, '_tts_started') or not self._tts_started:
+                await self.ws.send_json({"type": "tts_start"})
+                self._tts_started = True
+
+            for chunk in audio_chunks:
+                if self.should_stop_tts:
+                    break
+                chunk_b64 = base64.b64encode(chunk).decode('utf-8')
+                await self.ws.send_json({"type": "tts_chunk", "audio": chunk_b64})
+                await asyncio.sleep(0.005)
 
     async def speak(self, text: str):
         """Convert text to speech and stream to client."""
