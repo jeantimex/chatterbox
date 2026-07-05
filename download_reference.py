@@ -81,28 +81,33 @@ def main():
 
     print(f"Downloading audio from: {args.url}")
 
-    # Download audio with yt-dlp
+    # Download audio with yt-dlp (best audio format, we'll convert later)
     download_cmd = [
         "yt-dlp",
         "-x",  # Extract audio
-        "--audio-format", "wav",
         "--audio-quality", "0",  # Best quality
-        "-o", str(temp_audio.with_suffix("")),  # yt-dlp adds extension
+        "--no-playlist",  # Only download single video, not entire playlist
+        "-o", "_temp_audio.%(ext)s",
         args.url
     ]
 
     try:
-        subprocess.run(download_cmd, check=True)
+        result = subprocess.run(download_cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"yt-dlp error:\n{result.stderr}")
+            sys.exit(1)
     except subprocess.CalledProcessError as e:
         print(f"Error downloading audio: {e}")
         sys.exit(1)
 
-    # Find the downloaded file (yt-dlp may add extension)
+    # Find the downloaded file (extension varies based on source)
     temp_files = list(Path(".").glob("_temp_audio.*"))
     if not temp_files:
         print("Error: Downloaded file not found")
+        print("yt-dlp output:", result.stdout)
         sys.exit(1)
     temp_audio = temp_files[0]
+    print(f"Downloaded: {temp_audio}")
 
     # Cut audio if start/end specified
     start_sec = parse_timestamp(args.start)
@@ -187,51 +192,85 @@ def get_duration(filepath: Path) -> float:
 
 
 def isolate_voice(input_path: Path, output_path: Path) -> bool:
-    """Use demucs to separate vocals from background music."""
+    """Use audio-separator with UVR models to separate vocals from background music."""
     try:
-        subprocess.run(["python", "-c", "import demucs"], capture_output=True, check=True)
-    except subprocess.CalledProcessError:
-        print("Installing demucs for voice isolation...")
-        subprocess.run([sys.executable, "-m", "pip", "install", "demucs"], check=True)
+        from audio_separator.separator import Separator
+    except ImportError:
+        print("Installing audio-separator for voice isolation...")
+        subprocess.run([sys.executable, "-m", "pip", "install", "audio-separator[cpu]"], check=True)
+        from audio_separator.separator import Separator
+
+    import shutil
 
     print("Isolating voice (this may take a minute)...")
 
-    # Run demucs to separate vocals
-    result = subprocess.run(
-        [sys.executable, "-m", "demucs", "--two-stems=vocals", "-o", "separated", str(input_path)],
-        capture_output=True, text=True
-    )
+    output_dir = Path("_separated")
+    output_dir.mkdir(exist_ok=True)
 
-    if result.returncode != 0:
-        print(f"Demucs error: {result.stderr}")
+    try:
+        # Stage 1: Separate vocals from instrumental
+        separator = Separator(
+            output_dir=str(output_dir),
+            output_format="WAV",
+            normalization_threshold=0.9,
+        )
+        separator.load_model("UVR-MDX-NET-Voc_FT.onnx")
+        stage1_outputs = separator.separate(str(input_path))
+        del separator
+
+        # Find vocals file from stage 1
+        vocals_file = None
+        for f in stage1_outputs:
+            if "Vocals" in f or "vocal" in f.lower():
+                vocals_file = Path(f)
+                break
+
+        if not vocals_file or not vocals_file.exists():
+            print("Could not find vocals in stage 1 output")
+            return False
+
+        # Stage 2: De-reverb the vocals for cleaner output
+        separator2 = Separator(
+            output_dir=str(output_dir),
+            output_format="WAV",
+            normalization_threshold=0.9,
+        )
+        separator2.load_model("Reverb_HQ_By_FoxJoy.onnx")
+        stage2_outputs = separator2.separate(str(vocals_file))
+        del separator2
+
+        # Find dry vocals (no reverb)
+        dry_vocals = None
+        for f in stage2_outputs:
+            if "No Reverb" in f or "dry" in f.lower():
+                dry_vocals = Path(f)
+                break
+
+        # If no specific dry vocals found, use first output
+        if not dry_vocals:
+            dry_vocals = Path(stage2_outputs[0]) if stage2_outputs else vocals_file
+
+        if not dry_vocals.exists():
+            dry_vocals = vocals_file  # Fallback to stage 1 output
+
+        # Convert to proper format for voice cloning
+        subprocess.run([
+            "ffmpeg", "-y", "-i", str(dry_vocals),
+            "-ac", "1", "-ar", "22050",
+            str(output_path)
+        ], capture_output=True, check=True)
+
+        return True
+
+    except Exception as e:
+        print(f"Voice isolation error: {e}")
         return False
 
-    # Find the vocals file
-    stem_name = input_path.stem
-    vocals_path = Path("separated") / "htdemucs" / stem_name / "vocals.wav"
-
-    if not vocals_path.exists():
-        # Try alternative path structure
-        for vp in Path("separated").rglob("vocals.wav"):
-            vocals_path = vp
-            break
-
-    if not vocals_path.exists():
-        print("Could not find separated vocals file")
-        return False
-
-    # Convert to proper format
-    subprocess.run([
-        "ffmpeg", "-y", "-i", str(vocals_path),
-        "-ac", "1", "-ar", "22050",
-        str(output_path)
-    ], capture_output=True, check=True)
-
-    # Cleanup
-    import shutil
-    shutil.rmtree("separated", ignore_errors=True)
-
-    return True
+    finally:
+        # Cleanup
+        import gc
+        gc.collect()
+        shutil.rmtree(output_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

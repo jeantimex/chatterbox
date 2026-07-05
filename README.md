@@ -153,7 +153,7 @@ Reference audio requirements:
 
 #### Voice Isolation (--isolate-voice / -i)
 
-Use the `--isolate-voice` flag to remove background music and isolate the voice using [demucs](https://github.com/facebookresearch/demucs). This is recommended when:
+Use the `--isolate-voice` flag to remove background music and isolate the voice using [audio-separator](https://github.com/karaokenerds/python-audio-separator) with UVR models. This is recommended when:
 - The source has background music
 - There's ambient noise or sound effects
 - Multiple audio tracks are mixed together
@@ -163,7 +163,11 @@ Use the `--isolate-voice` flag to remove background music and isolate the voice 
 python download_reference.py "https://youtube.com/watch?v=VIDEO_ID" -s 0:30 -e 0:40 -o speaker.wav -i
 ```
 
-Note: Voice isolation takes ~30-60 seconds depending on clip length. Demucs will be auto-installed on first use.
+Note: Voice isolation takes ~30-60 seconds depending on clip length. Uses a two-stage pipeline:
+1. **UVR-MDX-NET-Voc_FT** — separates vocals from instrumental
+2. **Reverb_HQ_By_FoxJoy** — removes reverb for cleaner vocals
+
+Models are auto-downloaded on first use (~100MB).
 
 ### Test Voice Cloning
 
