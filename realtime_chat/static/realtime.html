@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chatterbox Realtime Chat</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+            min-height: 100vh;
+            color: #fff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container { max-width: 600px; width: 100%; }
+
+        h1 { text-align: center; margin-bottom: 8px; }
+        .subtitle { text-align: center; color: #94a3b8; margin-bottom: 20px; font-size: 0.9rem; }
+
+        .status-card {
+            background: rgba(255,255,255,0.05);
+            border-radius: 16px;
+            padding: 20px;
+            text-align: center;
+            margin-bottom: 20px;
+        }
+
+        .status-text {
+            font-size: 1.2rem;
+            color: #60a5fa;
+            margin-bottom: 15px;
+        }
+
+        .visualizer {
+            height: 80px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 3px;
+        }
+
+        .visualizer-bar {
+            width: 6px;
+            background: linear-gradient(to top, #3b82f6, #8b5cf6);
+            border-radius: 3px;
+            transition: height 0.05s ease;
+        }
+
+        .listening .visualizer-bar { background: linear-gradient(to top, #22c55e, #16a34a); }
+        .speaking .visualizer-bar { background: linear-gradient(to top, #f59e0b, #d97706); }
+
+        .chat-container {
+            background: rgba(255,255,255,0.03);
+            border-radius: 16px;
+            padding: 20px;
+            min-height: 300px;
+            max-height: 400px;
+            overflow-y: auto;
+            margin-bottom: 20px;
+        }
+
+        .message {
+            margin-bottom: 12px;
+            padding: 12px 16px;
+            border-radius: 12px;
+            max-width: 85%;
+            animation: fadeIn 0.3s ease;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .message.user {
+            background: #3b82f6;
+            margin-left: auto;
+        }
+
+        .message.ai {
+            background: rgba(255,255,255,0.1);
+        }
+
+        .controls {
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+        }
+
+        button {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 25px;
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn-start {
+            background: linear-gradient(135deg, #22c55e, #16a34a);
+            color: white;
+        }
+
+        .btn-stop {
+            background: linear-gradient(135deg, #ef4444, #dc2626);
+            color: white;
+        }
+
+        .btn-clear {
+            background: rgba(255,255,255,0.1);
+            color: white;
+        }
+
+        button:hover { transform: scale(1.05); }
+        button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+        .hint {
+            text-align: center;
+            color: #64748b;
+            font-size: 0.8rem;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎙️ Realtime Voice Chat</h1>
+        <p class="subtitle">Just speak naturally - I'm always listening</p>
+
+        <div class="status-card" id="statusCard">
+            <div class="status-text" id="statusText">Click Start to begin</div>
+            <div class="visualizer" id="visualizer"></div>
+        </div>
+
+        <div class="chat-container" id="chat"></div>
+
+        <div class="controls">
+            <button class="btn-start" id="startBtn">▶️ Start</button>
+            <button class="btn-stop" id="stopBtn" disabled>⏹️ Stop</button>
+            <button class="btn-clear" id="clearBtn">🗑️ Clear</button>
+        </div>
+
+        <p class="hint">Speak to chat • The AI will respond in a cloned voice • Interrupt anytime by speaking</p>
+    </div>
+
+    <script>
+        let ws = null;
+        let audioContext = null;
+        let mediaStream = null;
+        let processor = null;
+        let analyser = null;
+        let isRunning = false;
+
+        // Audio playback
+        let playbackContext = null;
+        let playbackTime = 0;
+
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const clearBtn = document.getElementById('clearBtn');
+        const statusText = document.getElementById('statusText');
+        const statusCard = document.getElementById('statusCard');
+        const chat = document.getElementById('chat');
+        const visualizer = document.getElementById('visualizer');
+
+        // Init visualizer
+        for (let i = 0; i < 24; i++) {
+            const bar = document.createElement('div');
+            bar.className = 'visualizer-bar';
+            bar.style.height = '4px';
+            visualizer.appendChild(bar);
+        }
+
+        function setStatus(text, mode = '') {
+            statusText.textContent = text;
+            statusCard.className = 'status-card ' + mode;
+        }
+
+        function addMessage(text, role) {
+            const div = document.createElement('div');
+            div.className = `message ${role}`;
+            div.textContent = text;
+            chat.appendChild(div);
+            chat.scrollTop = chat.scrollHeight;
+        }
+
+        function updateVisualizer(data) {
+            const bars = visualizer.querySelectorAll('.visualizer-bar');
+            const step = Math.floor(data.length / bars.length);
+            bars.forEach((bar, i) => {
+                const val = data[i * step] || 0;
+                bar.style.height = Math.max(4, (val / 255) * 60) + 'px';
+            });
+        }
+
+        function connect() {
+            const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${proto}//${location.host}/ws`);
+
+            ws.onopen = () => console.log('WebSocket connected');
+            ws.onclose = () => {
+                console.log('WebSocket disconnected');
+                if (isRunning) setTimeout(connect, 1000);
+            };
+            ws.onerror = (e) => console.error('WebSocket error', e);
+
+            ws.onmessage = (e) => {
+                const data = JSON.parse(e.data);
+                handleMessage(data);
+            };
+        }
+
+        let isTTSPlaying = false;
+
+        function handleMessage(data) {
+            switch (data.type) {
+                case 'status':
+                    setStatus(data.text, data.text.includes('Listen') ? 'listening' : '');
+                    break;
+                case 'user_text':
+                    addMessage(data.text, 'user');
+                    break;
+                case 'ai_text':
+                    addMessage(data.text, 'ai');
+                    break;
+                case 'tts_start':
+                    setStatus('Speaking...', 'speaking');
+                    isTTSPlaying = true;
+                    ws.send(JSON.stringify({ type: 'tts_playing', playing: true }));
+                    initPlayback();
+                    break;
+                case 'tts_chunk':
+                    playChunk(data.audio);
+                    break;
+                case 'tts_end':
+                    // Don't set isTTSPlaying=false here - wait for audio to actually finish
+                    // The onended callback in playChunk will handle this
+                    console.log('TTS chunks received, waiting for audio playback to complete...');
+                    break;
+                case 'interrupt':
+                case 'stop_tts':
+                    setStatus('Listening...', 'listening');
+                    isTTSPlaying = false;
+                    // Stop audio playback immediately
+                    if (playbackContext) {
+                        playbackContext.close();
+                        playbackContext = null;
+                    }
+                    break;
+                case 'cleared':
+                    chat.innerHTML = '';
+                    addMessage('Conversation cleared. Start speaking!', 'ai');
+                    break;
+            }
+        }
+
+        let activeSourceCount = 0;
+
+        function initPlayback() {
+            if (!playbackContext) {
+                playbackContext = new AudioContext({ sampleRate: 24000 });
+            }
+            playbackTime = playbackContext.currentTime;
+            activeSourceCount = 0;
+        }
+
+        function playChunk(b64) {
+            if (!playbackContext) return;
+
+            const binary = atob(b64);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+            const int16 = new Int16Array(bytes.buffer);
+            const float32 = new Float32Array(int16.length);
+            for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768.0;
+
+            const buffer = playbackContext.createBuffer(1, float32.length, 24000);
+            buffer.getChannelData(0).set(float32);
+
+            const source = playbackContext.createBufferSource();
+            source.buffer = buffer;
+            source.connect(playbackContext.destination);
+
+            const startTime = Math.max(playbackTime, playbackContext.currentTime);
+            source.start(startTime);
+            playbackTime = startTime + buffer.duration;
+
+            activeSourceCount++;
+            source.onended = () => {
+                activeSourceCount--;
+                // Only set tts_playing=false when ALL audio finished
+                if (activeSourceCount <= 0 && isTTSPlaying) {
+                    isTTSPlaying = false;
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ type: 'tts_playing', playing: false }));
+                    }
+                    setStatus('Listening...', 'listening');
+                }
+            };
+        }
+
+        async function start() {
+            try {
+                mediaStream = await navigator.mediaDevices.getUserMedia({
+                    audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true }
+                });
+
+                audioContext = new AudioContext({ sampleRate: 16000 });
+                const source = audioContext.createMediaStreamSource(mediaStream);
+
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 256;
+                source.connect(analyser);
+
+                processor = audioContext.createScriptProcessor(4096, 1, 1);
+                processor.onaudioprocess = (e) => {
+                    if (!isRunning || ws.readyState !== WebSocket.OPEN) return;
+
+                    const input = e.inputBuffer.getChannelData(0);
+                    const int16 = new Int16Array(input.length);
+                    for (let i = 0; i < input.length; i++) {
+                        const s = Math.max(-1, Math.min(1, input[i]));
+                        int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                    }
+                    ws.send(int16.buffer);
+
+                    // Update visualizer
+                    const freqData = new Uint8Array(analyser.frequencyBinCount);
+                    analyser.getByteFrequencyData(freqData);
+                    updateVisualizer(freqData);
+                };
+
+                source.connect(processor);
+                processor.connect(audioContext.destination);
+
+                isRunning = true;
+                connect();
+
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+                setStatus('Listening...', 'listening');
+
+            } catch (err) {
+                console.error('Error starting:', err);
+                alert('Could not access microphone: ' + err.message);
+            }
+        }
+
+        function stop() {
+            isRunning = false;
+
+            if (ws) { ws.close(); ws = null; }
+            if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+            if (audioContext) { audioContext.close(); audioContext = null; }
+
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            setStatus('Stopped', '');
+
+            // Reset visualizer
+            visualizer.querySelectorAll('.visualizer-bar').forEach(b => b.style.height = '4px');
+        }
+
+        startBtn.onclick = start;
+        stopBtn.onclick = stop;
+        clearBtn.onclick = () => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'clear' }));
+            }
+        };
+    </script>
+</body>
+</html>
