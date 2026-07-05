@@ -117,6 +117,91 @@ ta.save("test-2.wav", wav, model.sr)
 ```
 See `example_tts.py` and `example_vc.py` for more examples.
 
+## Mac Setup & Testing Scripts
+
+Quick setup for Mac (M1/M2/M3/M4):
+
+```bash
+# Setup virtual environment and install dependencies
+./mac-setup.sh
+source venv/bin/activate
+
+# Test TTS models
+python test_turbo.py        # English Turbo model
+python test_multilingual.py # Multilingual V3 model
+```
+
+### Voice Cloning from YouTube
+
+Download a reference voice clip from YouTube:
+
+```bash
+# Install dependencies (if needed)
+brew install yt-dlp ffmpeg
+
+# Download 10 seconds of audio (adjust start/end times)
+python download_reference.py "https://youtube.com/watch?v=VIDEO_ID" --start 0:30 --end 0:40 --output speaker.wav
+
+# Remove background music and isolate voice (recommended for music videos/noisy audio)
+python download_reference.py "https://youtube.com/watch?v=VIDEO_ID" --start 0:30 --end 0:40 --output speaker.wav --isolate-voice
+```
+
+Reference audio requirements:
+- **Minimum:** 5 seconds (required for Turbo model)
+- **Recommended:** 6-15 seconds of clear speech
+- **Quality:** One speaker, minimal background noise
+
+#### Voice Isolation (--isolate-voice / -i)
+
+Use the `--isolate-voice` flag to remove background music and isolate the voice using [demucs](https://github.com/facebookresearch/demucs). This is recommended when:
+- The source has background music
+- There's ambient noise or sound effects
+- Multiple audio tracks are mixed together
+
+```bash
+# Isolate voice from a music video or interview with background music
+python download_reference.py "https://youtube.com/watch?v=VIDEO_ID" -s 0:30 -e 0:40 -o speaker.wav -i
+```
+
+Note: Voice isolation takes ~30-60 seconds depending on clip length. Demucs will be auto-installed on first use.
+
+### Test Voice Cloning
+
+```bash
+# Default: English + Chinese
+python test_voice_cloning.py speaker.wav
+
+# Single language
+python test_voice_cloning.py speaker.wav --lang en
+
+# Multiple languages
+python test_voice_cloning.py speaker.wav --lang en,zh,ja,ko
+```
+
+### Voice Cloning Parameters
+
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `--exaggeration` / `-e` | 0.5 | Expressiveness (lower = closer to original voice) |
+| `--cfg` / `-c` | 0.5 | CFG weight (lower = better speaker similarity) |
+| `--temperature` / `-t` | 0.8 | Variation (lower = more consistent) |
+
+```bash
+# Better voice similarity (recommended for cloning)
+python test_voice_cloning.py speaker.wav --lang en -e 0.3 -c 0.3
+
+# Even more faithful to reference
+python test_voice_cloning.py speaker.wav --lang en -e 0.2 -c 0.2 -t 0.7
+
+# More expressive/dramatic (less similar to reference)
+python test_voice_cloning.py speaker.wav --lang en -e 0.7 -c 0.5
+```
+
+**Tips:**
+- If reference speaker talks fast, lower `cfg_weight` (~0.3) helps with pacing
+- For dramatic speech, use lower `cfg_weight` (~0.3) + higher `exaggeration` (~0.7)
+- Cross-language cloning may inherit reference accent — set `cfg_weight=0` to mitigate
+
 ## Supported Languages
 The general-purpose Chatterbox Multilingual model supports the following languages:
 
