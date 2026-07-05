@@ -192,15 +192,25 @@ def get_duration(filepath: Path) -> float:
 
 
 def isolate_voice(input_path: Path, output_path: Path) -> bool:
-    """Use audio-separator with UVR models to separate vocals from background music."""
-    try:
-        from audio_separator.separator import Separator
-    except ImportError:
-        print("Installing audio-separator for voice isolation...")
-        subprocess.run([sys.executable, "-m", "pip", "install", "audio-separator[cpu]"], check=True)
-        from audio_separator.separator import Separator
-
+    """Use audio-separator CLI with UVR models to separate vocals from background music."""
     import shutil
+
+    # Find audio-separator command (prefer pipx installation)
+    audio_sep_cmd = None
+    for cmd_path in [
+        Path.home() / ".local/pipx/venvs/audio-separator/bin/audio-separator",
+        Path.home() / ".local/bin/audio-separator",
+        "audio-separator",  # fallback to PATH
+    ]:
+        result = subprocess.run([str(cmd_path), "--help"], capture_output=True)
+        if result.returncode == 0:
+            audio_sep_cmd = str(cmd_path)
+            break
+
+    if not audio_sep_cmd:
+        print("audio-separator not found. Install it with:")
+        print("  pipx install 'audio-separator[cpu]'")
+        return False
 
     print("Isolating voice (this may take a minute)...")
 
@@ -209,49 +219,56 @@ def isolate_voice(input_path: Path, output_path: Path) -> bool:
 
     try:
         # Stage 1: Separate vocals from instrumental
-        separator = Separator(
-            output_dir=str(output_dir),
-            output_format="WAV",
-            normalization_threshold=0.9,
-        )
-        separator.load_model("UVR-MDX-NET-Voc_FT.onnx")
-        stage1_outputs = separator.separate(str(input_path))
-        del separator
+        print("  Stage 1: Separating vocals from instrumental...")
+        result = subprocess.run([
+            audio_sep_cmd,
+            str(input_path),
+            "-m", "UVR-MDX-NET-Voc_FT.onnx",
+            "--output_dir", str(output_dir),
+            "--output_format", "WAV",
+        ], capture_output=True, text=True)
+
+        if result.returncode != 0:
+            print(f"Stage 1 error: {result.stderr}")
+            return False
 
         # Find vocals file from stage 1
         vocals_file = None
-        for f in stage1_outputs:
-            if "Vocals" in f or "vocal" in f.lower():
-                vocals_file = Path(f)
+        for f in output_dir.glob("*Vocals*"):
+            vocals_file = f
+            break
+        if not vocals_file:
+            for f in output_dir.glob("*vocal*"):
+                vocals_file = f
                 break
 
         if not vocals_file or not vocals_file.exists():
             print("Could not find vocals in stage 1 output")
+            print(f"Files in output dir: {list(output_dir.glob('*'))}")
             return False
 
         # Stage 2: De-reverb the vocals for cleaner output
-        separator2 = Separator(
-            output_dir=str(output_dir),
-            output_format="WAV",
-            normalization_threshold=0.9,
-        )
-        separator2.load_model("Reverb_HQ_By_FoxJoy.onnx")
-        stage2_outputs = separator2.separate(str(vocals_file))
-        del separator2
+        print("  Stage 2: Removing reverb...")
+        result = subprocess.run([
+            audio_sep_cmd,
+            str(vocals_file),
+            "-m", "Reverb_HQ_By_FoxJoy.onnx",
+            "--output_dir", str(output_dir),
+            "--output_format", "WAV",
+        ], capture_output=True, text=True)
 
-        # Find dry vocals (no reverb)
-        dry_vocals = None
-        for f in stage2_outputs:
-            if "No Reverb" in f or "dry" in f.lower():
-                dry_vocals = Path(f)
+        if result.returncode != 0:
+            print(f"Stage 2 error: {result.stderr}")
+            # Continue with stage 1 output
+            dry_vocals = vocals_file
+        else:
+            # Find dry vocals (no reverb)
+            dry_vocals = None
+            for f in output_dir.glob("*No Reverb*"):
+                dry_vocals = f
                 break
-
-        # If no specific dry vocals found, use first output
-        if not dry_vocals:
-            dry_vocals = Path(stage2_outputs[0]) if stage2_outputs else vocals_file
-
-        if not dry_vocals.exists():
-            dry_vocals = vocals_file  # Fallback to stage 1 output
+            if not dry_vocals:
+                dry_vocals = vocals_file
 
         # Convert to proper format for voice cloning
         subprocess.run([
@@ -268,8 +285,6 @@ def isolate_voice(input_path: Path, output_path: Path) -> bool:
 
     finally:
         # Cleanup
-        import gc
-        gc.collect()
         shutil.rmtree(output_dir, ignore_errors=True)
 
 
