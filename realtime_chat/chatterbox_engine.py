@@ -109,27 +109,51 @@ class ChatterboxEngine:
         self._prewarm()
 
     def _prewarm(self):
-        """Prewarm the model with a test synthesis."""
+        """Prewarm the model and cache reference audio embedding."""
         logger.info("Prewarming Chatterbox model...")
         start = time.time()
         try:
-            if self.use_turbo:
-                _ = self.model.generate("Hello.", audio_prompt_path=self.reference_audio)
+            # Cache reference audio embedding once
+            if self.reference_audio and hasattr(self.model, 'prepare_conditionals'):
+                logger.info(f"Caching reference audio embedding: {self.reference_audio}")
+                self.model.prepare_conditionals(self.reference_audio)
+                self._conditionals_cached = True
+            else:
+                self._conditionals_cached = False
+
+            # Prewarm with a short synthesis (no audio_prompt_path since we cached it)
+            if self._conditionals_cached:
+                _ = self.model.generate("Hello.")
             else:
                 _ = self.model.generate("Hello.", audio_prompt_path=self.reference_audio)
+
             elapsed = time.time() - start
             logger.info(f"Prewarm complete in {elapsed:.2f}s")
         except Exception as e:
             logger.warning(f"Prewarm failed: {e}")
+            self._conditionals_cached = False
 
     def set_reference_audio(self, path: str):
-        """Set the reference audio for voice cloning."""
+        """Set the reference audio for voice cloning and cache its embedding."""
         # Resolve to absolute path
         path = str(Path(path).resolve())
         if not Path(path).exists():
             logger.warning(f"Reference audio not found: {path}")
+            return
+
         self.reference_audio = path
         logger.info(f"Reference audio set to: {path}")
+
+        # Re-cache the conditionals for the new reference audio
+        if hasattr(self.model, 'prepare_conditionals'):
+            logger.info("Caching new reference audio embedding...")
+            try:
+                self.model.prepare_conditionals(path)
+                self._conditionals_cached = True
+                logger.info("Reference audio embedding cached!")
+            except Exception as e:
+                logger.warning(f"Failed to cache reference audio: {e}")
+                self._conditionals_cached = False
 
     def _split_sentences(self, text: str) -> list[tuple[str, str]]:
         """
@@ -194,25 +218,40 @@ class ChatterboxEngine:
             return True
 
         logger.info(f"Synthesizing: {text[:50]}...")
-        logger.info(f"Using reference audio: {self.reference_audio}")
+        logger.info(f"Using cached conditionals: {getattr(self, '_conditionals_cached', False)}")
         start_time = time.time()
 
         try:
             with self._lock:
-                # Generate audio
-                if self.use_turbo:
-                    audio = self.model.generate(
-                        text,
-                        audio_prompt_path=self.reference_audio,
-                        temperature=0.8,
-                    )
+                # Generate audio - use cached conditionals if available
+                if getattr(self, '_conditionals_cached', False):
+                    # Conditionals already cached, no need to pass audio_prompt_path
+                    if self.use_turbo:
+                        audio = self.model.generate(
+                            text,
+                            temperature=0.8,
+                        )
+                    else:
+                        audio = self.model.generate(
+                            text,
+                            exaggeration=0.5,
+                            cfg_weight=0.5,
+                        )
                 else:
-                    audio = self.model.generate(
-                        text,
-                        audio_prompt_path=self.reference_audio,
-                        exaggeration=0.5,
-                        cfg_weight=0.5,
-                    )
+                    # No cached conditionals, pass reference audio each time
+                    if self.use_turbo:
+                        audio = self.model.generate(
+                            text,
+                            audio_prompt_path=self.reference_audio,
+                            temperature=0.8,
+                        )
+                    else:
+                        audio = self.model.generate(
+                            text,
+                            audio_prompt_path=self.reference_audio,
+                            exaggeration=0.5,
+                            cfg_weight=0.5,
+                        )
 
             ttfa = time.time() - start_time
             logger.info(f"TTFA: {ttfa:.2f}s for '{text[:30]}...'")
