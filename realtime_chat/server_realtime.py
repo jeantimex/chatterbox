@@ -59,8 +59,80 @@ Keep responses SHORT - 1-2 sentences max. Be conversational and friendly.
 Don't use lists, bullet points, or long explanations."""
 
 
+class SileroVAD:
+    """Voice Activity Detection using Silero VAD - filters out music/noise."""
+
+    def __init__(self, threshold=0.5, sample_rate=SAMPLE_RATE):
+        self.threshold = threshold
+        self.sample_rate = sample_rate
+        self.is_speaking = False
+        self.speech_start_time = None
+        self.last_speech_time = None
+        self.model = None
+        self._load_model()
+
+    def _load_model(self):
+        """Load Silero VAD model."""
+        try:
+            import torch
+            self.torch = torch
+            model, _ = torch.hub.load(
+                repo_or_dir='snakers4/silero-vad',
+                model='silero_vad',
+                force_reload=False,
+                trust_repo=True
+            )
+            self.model = model
+            logger.info("Silero VAD model loaded - will filter out music/noise")
+        except Exception as e:
+            logger.warning(f"Failed to load Silero VAD: {e}, using RMS fallback")
+            self.model = None
+
+    def process(self, audio_chunk: np.ndarray) -> dict:
+        """Process audio chunk and return VAD state."""
+        current_time = time.time()
+        rms = np.sqrt(np.mean(audio_chunk.astype(np.float32) ** 2)) / 32768.0
+
+        # Use Silero VAD if available
+        if self.model is not None:
+            try:
+                audio_float = audio_chunk.astype(np.float32) / 32768.0
+                audio_tensor = self.torch.from_numpy(audio_float)
+                speech_prob = self.model(audio_tensor, self.sample_rate).item()
+                is_speech = speech_prob > self.threshold
+            except Exception:
+                is_speech = rms > SILENCE_THRESHOLD
+        else:
+            is_speech = rms > SILENCE_THRESHOLD
+
+        result = {
+            "is_speech": is_speech,
+            "rms": rms,
+            "speech_started": False,
+            "speech_ended": False,
+        }
+
+        if is_speech:
+            self.last_speech_time = current_time
+            if not self.is_speaking:
+                self.is_speaking = True
+                self.speech_start_time = current_time
+                result["speech_started"] = True
+        else:
+            if self.is_speaking and self.last_speech_time:
+                silence_duration = current_time - self.last_speech_time
+                speech_duration = self.last_speech_time - self.speech_start_time
+
+                if silence_duration >= SILENCE_DURATION_END and speech_duration >= SPEECH_MIN_DURATION:
+                    self.is_speaking = False
+                    result["speech_ended"] = True
+                    result["speech_duration"] = speech_duration
+
+        return result
+
+
 class SimpleVAD:
-    """Simple Voice Activity Detection based on RMS energy."""
+    """Simple Voice Activity Detection based on RMS energy (fallback)."""
 
     def __init__(self, threshold=SILENCE_THRESHOLD, sample_rate=SAMPLE_RATE):
         self.threshold = threshold
@@ -71,7 +143,6 @@ class SimpleVAD:
 
     def process(self, audio_chunk: np.ndarray) -> dict:
         """Process audio chunk and return VAD state."""
-        # Calculate RMS energy
         rms = np.sqrt(np.mean(audio_chunk.astype(np.float32) ** 2)) / 32768.0
 
         current_time = time.time()
@@ -245,7 +316,7 @@ class ConversationSession:
 
     def __init__(self, ws: WebSocket):
         self.ws = ws
-        self.vad = SimpleVAD()
+        self.vad = SileroVAD()
         self.audio_buffer = []
         self.is_ai_speaking = False
         self.should_stop_tts = False
